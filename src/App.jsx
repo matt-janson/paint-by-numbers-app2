@@ -1,5 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, ZoomIn, ZoomOut, RotateCcw, Eye, EyeOff, Palette, ArrowLeft, Grid, Trash2, Plus } from 'lucide-react';
+import { Upload, ZoomIn, ZoomOut, RotateCcw, Eye, EyeOff, Palette, ArrowLeft, Grid, Trash2, Plus, Lock, Unlock } from 'lucide-react';
+
+const ADMIN_CODE = "PAINT2024"; // Change this to your own secret code
 
 const PaintByNumbers = () => {
   const [view, setView] = useState('gallery');
@@ -13,44 +15,113 @@ const PaintByNumbers = () => {
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [numColors, setNumColors] = useState(400);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [showAdminPrompt, setShowAdminPrompt] = useState(false);
+  const [adminInput, setAdminInput] = useState('');
+  const [clickCount, setClickCount] = useState(0);
+  const [loading, setLoading] = useState(true);
   
   const canvasRef = useRef(null);
   const overlayCanvasRef = useRef(null);
+  const clickTimerRef = useRef(null);
 
   useEffect(() => {
     loadProjects();
   }, []);
 
-  const loadProjects = () => {
+  const loadProjects = async () => {
+    setLoading(true);
     try {
-      const saved = localStorage.getItem('paintByNumbersProjects');
-      if (saved) {
-        setProjects(JSON.parse(saved));
+      const keys = await window.storage.list('project:', true);
+      if (keys && keys.keys) {
+        const loadedProjects = [];
+        for (const key of keys.keys) {
+          try {
+            const result = await window.storage.get(key, true);
+            if (result && result.value) {
+              const project = JSON.parse(result.value);
+              loadedProjects.push(project);
+            }
+          } catch (e) {
+            console.error('Error loading project:', key, e);
+          }
+        }
+        setProjects(loadedProjects.sort((a, b) => b.createdAt - a.createdAt));
       }
     } catch (error) {
       console.error('Error loading projects:', error);
     }
+    setLoading(false);
   };
 
-  const saveProjects = (updatedProjects) => {
+  const saveProject = async (project) => {
     try {
-      localStorage.setItem('paintByNumbersProjects', JSON.stringify(updatedProjects));
-      setProjects(updatedProjects);
+      await window.storage.set(`project:${project.id}`, JSON.stringify(project), true);
+      await loadProjects();
     } catch (error) {
-      console.error('Error saving projects:', error);
+      console.error('Error saving project:', error);
+      alert('Error saving project. Please try again.');
     }
   };
 
-  const deleteProject = (projectId) => {
-    const updated = projects.filter(p => p.id !== projectId);
-    saveProjects(updated);
-    if (currentProject && currentProject.id === projectId) {
-      setCurrentProject(null);
-      setView('gallery');
+  const deleteProject = async (projectId) => {
+    if (!isAdmin) {
+      alert('Admin access required');
+      return;
+    }
+    
+    if (!confirm('Are you sure you want to delete this project? This cannot be undone.')) {
+      return;
+    }
+    
+    try {
+      await window.storage.delete(`project:${projectId}`, true);
+      await loadProjects();
+      if (currentProject && currentProject.id === projectId) {
+        setCurrentProject(null);
+        setView('gallery');
+      }
+    } catch (error) {
+      console.error('Error deleting project:', error);
+      alert('Error deleting project. Please try again.');
+    }
+  };
+
+  const handleTitleClick = () => {
+    setClickCount(prev => prev + 1);
+    
+    if (clickTimerRef.current) {
+      clearTimeout(clickTimerRef.current);
+    }
+    
+    if (clickCount + 1 >= 5) {
+      setShowAdminPrompt(true);
+      setClickCount(0);
+    } else {
+      clickTimerRef.current = setTimeout(() => {
+        setClickCount(0);
+      }, 2000);
+    }
+  };
+
+  const handleAdminLogin = () => {
+    if (adminInput === ADMIN_CODE) {
+      setIsAdmin(true);
+      setShowAdminPrompt(false);
+      setAdminInput('');
+      alert('Admin mode activated! You can now upload and delete projects.');
+    } else {
+      alert('Incorrect code');
+      setAdminInput('');
     }
   };
 
   const handleImageUpload = (e) => {
+    if (!isAdmin) {
+      alert('Admin access required to upload images');
+      return;
+    }
+    
     const file = e.target.files[0];
     if (file) {
       const reader = new FileReader();
@@ -65,10 +136,10 @@ const PaintByNumbers = () => {
     }
   };
 
-  const processNewImage = (img, dataUrl) => {
+  const processNewImage = async (img, dataUrl) => {
     setProcessing(true);
     
-    setTimeout(() => {
+    setTimeout(async () => {
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
       
@@ -104,11 +175,10 @@ const PaintByNumbers = () => {
         numColors,
         regions: foundRegions,
         colors: quantized.palette,
-        paintedRegions: []
+        userProgress: {}
       };
       
-      const updatedProjects = [project, ...projects];
-      saveProjects(updatedProjects);
+      await saveProject(project);
       setCurrentProject(project);
       setView('canvas');
       setProcessing(false);
@@ -257,7 +327,12 @@ const PaintByNumbers = () => {
 
   const drawCanvas = () => {
     const canvas = canvasRef.current;
-    if (!canvas || !currentProject) return;
+    if (!canvas || !currentProject) {
+      console.log('Canvas ref or project missing');
+      return;
+    }
+    
+    console.log('Drawing canvas:', currentProject.width, 'x', currentProject.height);
     
     canvas.width = currentProject.width;
     canvas.height = currentProject.height;
@@ -265,9 +340,23 @@ const PaintByNumbers = () => {
     
     const img = new Image();
     img.onload = () => {
+      console.log('Image loaded successfully');
       ctx.drawImage(img, 0, 0, currentProject.width, currentProject.height);
     };
+    img.onerror = (e) => {
+      console.error('Image failed to load:', e);
+      alert('Failed to load project image. The image data may be corrupted.');
+    };
     img.src = currentProject.imageUrl;
+  };
+
+  const getUserId = () => {
+    let userId = localStorage.getItem('paintByNumbersUserId');
+    if (!userId) {
+      userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+      localStorage.setItem('paintByNumbersUserId', userId);
+    }
+    return userId;
   };
 
   const drawOverlay = () => {
@@ -280,7 +369,9 @@ const PaintByNumbers = () => {
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     
-    const paintedSet = new Set(currentProject.paintedRegions);
+    const userId = getUserId();
+    const userPaintedRegions = currentProject.userProgress?.[userId] || [];
+    const paintedSet = new Set(userPaintedRegions);
     
     currentProject.regions.forEach(region => {
       const isPainted = paintedSet.has(region.id);
@@ -324,7 +415,7 @@ const PaintByNumbers = () => {
     });
   };
 
-  const handleCanvasClick = (e) => {
+  const handleCanvasClick = async (e) => {
     if (!selectedColor || isDragging || !currentProject) return;
     
     const canvas = overlayCanvasRef.current;
@@ -336,17 +427,19 @@ const PaintByNumbers = () => {
       r.pixels.some(([px, py]) => px === x && py === y)
     );
     
-    if (region && region.colorId === selectedColor && !currentProject.paintedRegions.includes(region.id)) {
+    const userId = getUserId();
+    const userPaintedRegions = currentProject.userProgress?.[userId] || [];
+    
+    if (region && region.colorId === selectedColor && !userPaintedRegions.includes(region.id)) {
       const updatedProject = {
         ...currentProject,
-        paintedRegions: [...currentProject.paintedRegions, region.id]
+        userProgress: {
+          ...currentProject.userProgress,
+          [userId]: [...userPaintedRegions, region.id]
+        }
       };
       setCurrentProject(updatedProject);
-      
-      const updatedProjects = projects.map(p => 
-        p.id === updatedProject.id ? updatedProject : p
-      );
-      saveProjects(updatedProjects);
+      await saveProject(updatedProject);
     }
   };
 
@@ -370,6 +463,16 @@ const PaintByNumbers = () => {
   };
 
   const openProject = (project) => {
+    console.log('Opening project:', project.id);
+    console.log('Project has image:', !!project.imageUrl);
+    console.log('Project regions:', project.regions?.length);
+    console.log('Project colors:', project.colors?.length);
+    
+    if (!project.imageUrl || !project.regions || !project.colors) {
+      alert('This project has corrupted data. Please delete and recreate it.');
+      return;
+    }
+    
     setCurrentProject(project);
     setView('canvas');
     setZoom(1);
@@ -385,232 +488,233 @@ const PaintByNumbers = () => {
 
   if (view === 'gallery') {
     return (
-      <div style={{ width: '100%', minHeight: '100vh', backgroundColor: '#111827', color: 'white', overflow: 'auto' }}>
-        <div style={{ padding: '1.5rem' }}>
-          <h1 style={{ fontSize: '1.875rem', fontWeight: 'bold', marginBottom: '1.5rem' }}>My Paint by Numbers Gallery</h1>
-          
-          <div style={{ marginBottom: '1.5rem' }}>
-            <label style={{ 
-              padding: '0.75rem 1.5rem', 
-              backgroundColor: '#2563eb', 
-              borderRadius: '0.5rem', 
-              cursor: 'pointer', 
-              display: 'inline-flex', 
-              alignItems: 'center', 
-              gap: '0.5rem',
-              fontSize: '1.125rem'
-            }}>
-              <Plus size={24} />
-              Create New Project
-              <input type="file" accept="image/*" onChange={handleImageUpload} style={{ display: 'none' }} />
-            </label>
-            <div style={{ marginTop: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <label style={{ fontSize: '0.875rem' }}>Colors for new projects:</label>
-              <input 
-                type="number" 
-                min="50" 
-                max="500" 
-                value={numColors}
-                onChange={(e) => setNumColors(parseInt(e.target.value))}
-                style={{ 
-                  width: '6rem', 
-                  padding: '0.5rem', 
-                  backgroundColor: '#1f2937', 
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '0.25rem'
-                }}
-              />
-            </div>
+      <div className="w-full min-h-screen bg-gray-900 text-white overflow-auto">
+        <div className="p-6">
+          <div className="flex items-center justify-between mb-6">
+            <h1 
+              className="text-3xl font-bold cursor-pointer select-none"
+              onClick={handleTitleClick}
+            >
+              Paint by Numbers Gallery
+            </h1>
+            {isAdmin && (
+              <div className="flex items-center gap-2 px-4 py-2 bg-green-600 rounded-lg">
+                <Unlock size={20} />
+                <span className="font-semibold">Admin Mode</span>
+              </div>
+            )}
           </div>
-
-          {processing && (
-            <div style={{ 
-              position: 'fixed', 
-              inset: 0, 
-              display: 'flex', 
-              alignItems: 'center', 
-              justifyContent: 'center', 
-              backgroundColor: 'rgba(0,0,0,0.75)', 
-              zIndex: 50 
-            }}>
-              <div style={{ textAlign: 'center' }}>
-                <div style={{ 
-                  width: '4rem', 
-                  height: '4rem', 
-                  border: '2px solid white', 
-                  borderTopColor: 'transparent',
-                  borderRadius: '50%',
-                  animation: 'spin 1s linear infinite',
-                  margin: '0 auto 1rem'
-                }}></div>
-                <div style={{ fontSize: '1.25rem' }}>Processing image with {numColors} colors...</div>
+          
+          {isAdmin && (
+            <div className="mb-6">
+              <label className="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded-lg cursor-pointer inline-flex items-center gap-2 text-lg">
+                <Plus size={24} />
+                Create New Project
+                <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
+              </label>
+              <div className="mt-4 flex items-center gap-2">
+                <label className="text-sm">Colors for new projects:</label>
+                <input 
+                  type="number" 
+                  min="50" 
+                  max="500" 
+                  value={numColors}
+                  onChange={(e) => setNumColors(parseInt(e.target.value))}
+                  className="w-24 px-3 py-2 bg-gray-800 rounded"
+                />
               </div>
             </div>
           )}
 
-          {projects.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '5rem 0', color: '#6b7280' }}>
-              <Grid size={64} style={{ margin: '0 auto 1rem', opacity: 0.5 }} />
-              <p style={{ fontSize: '1.25rem' }}>No projects yet. Upload a photo to get started!</p>
+          {showAdminPrompt && (
+            <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
+              <div className="bg-gray-800 p-8 rounded-lg max-w-md w-full">
+                <div className="flex items-center gap-3 mb-4">
+                  <Lock size={32} className="text-yellow-500" />
+                  <h2 className="text-2xl font-bold">Admin Access</h2>
+                </div>
+                <p className="text-gray-300 mb-4">Enter admin code to unlock upload features:</p>
+                <input
+                  type="password"
+                  value={adminInput}
+                  onChange={(e) => setAdminInput(e.target.value)}
+                  onKeyPress={(e) => e.key === 'Enter' && handleAdminLogin()}
+                  className="w-full px-4 py-2 bg-gray-700 rounded mb-4"
+                  placeholder="Enter code"
+                  autoFocus
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleAdminLogin}
+                    className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded"
+                  >
+                    Unlock
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowAdminPrompt(false);
+                      setAdminInput('');
+                    }}
+                    className="flex-1 px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {processing && (
+            <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-75 z-50">
+              <div className="text-center">
+                <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-white mx-auto mb-4"></div>
+                <div className="text-xl">Processing image with {numColors} colors...</div>
+              </div>
+            </div>
+          )}
+
+          {loading ? (
+            <div className="text-center py-20">
+              <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-white mx-auto mb-4"></div>
+              <p className="text-xl text-gray-400">Loading projects...</p>
+            </div>
+          ) : projects.length === 0 ? (
+            <div className="text-center py-20 text-gray-500">
+              <Grid size={64} className="mx-auto mb-4 opacity-50" />
+              <p className="text-xl">No projects available yet.</p>
+              {!isAdmin && (
+                <p className="text-sm mt-2 text-gray-600">Check back soon for new paint by numbers!</p>
+              )}
             </div>
           ) : (
-            <div style={{ 
-              display: 'grid', 
-              gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', 
-              gap: '1.5rem' 
-            }}>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {projects.map(project => {
+                const userId = getUserId();
+                const userPaintedRegions = project.userProgress?.[userId] || [];
                 const progress = project.regions.length > 0 
-                  ? (project.paintedRegions.length / project.regions.length * 100).toFixed(1)
+                  ? (userPaintedRegions.length / project.regions.length * 100).toFixed(1)
                   : 0;
                 
                 return (
-                  <div key={project.id} style={{ 
-                    backgroundColor: '#1f2937', 
-                    borderRadius: '0.5rem', 
-                    overflow: 'hidden',
-                    transition: 'all 0.2s'
-                  }}>
+                  <div key={project.id} className="bg-gray-800 rounded-lg overflow-hidden hover:ring-2 ring-blue-500 transition-all">
                     <div 
-                      style={{ cursor: 'pointer' }}
+                      className="cursor-pointer"
                       onClick={() => openProject(project)}
                     >
                       <img 
                         src={project.imageUrl} 
                         alt={project.name}
-                        style={{ width: '100%', height: '12rem', objectFit: 'cover' }}
+                        className="w-full h-48 object-cover"
                       />
-                      <div style={{ padding: '1rem' }}>
-                        <h3 style={{ fontWeight: 'bold', fontSize: '1.125rem', marginBottom: '0.5rem' }}>{project.name}</h3>
-                        <div style={{ fontSize: '0.875rem', color: '#9ca3af' }}>
+                      <div className="p-4">
+                        <h3 className="font-bold text-lg mb-2">{project.name}</h3>
+                        <div className="text-sm text-gray-400 space-y-1">
                           <div>Colors: {project.numColors}</div>
                           <div>Regions: {project.regions.length}</div>
-                          <div>Progress: {progress}%</div>
-                          <div style={{ 
-                            width: '100%', 
-                            backgroundColor: '#374151', 
-                            borderRadius: '9999px', 
-                            height: '0.5rem', 
-                            marginTop: '0.5rem' 
-                          }}>
+                          <div>Your Progress: {progress}%</div>
+                          <div className="w-full bg-gray-700 rounded-full h-2 mt-2">
                             <div 
-                              style={{ 
-                                backgroundColor: '#2563eb', 
-                                height: '0.5rem', 
-                                borderRadius: '9999px',
-                                width: `${progress}%`,
-                                transition: 'width 0.3s'
-                              }}
+                              className="bg-blue-600 h-2 rounded-full transition-all"
+                              style={{ width: `${progress}%` }}
                             />
                           </div>
                         </div>
                       </div>
                     </div>
-                    <div style={{ padding: '0 1rem 1rem' }}>
-                      <button
-                        onClick={() => deleteProject(project.id)}
-                        style={{
-                          width: '100%',
-                          padding: '0.5rem 1rem',
-                          backgroundColor: '#dc2626',
-                          color: 'white',
-                          border: 'none',
-                          borderRadius: '0.25rem',
-                          cursor: 'pointer',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          gap: '0.5rem'
-                        }}
-                      >
-                        <Trash2 size={16} />
-                        Delete
-                      </button>
-                    </div>
+                    {isAdmin && (
+                      <div className="px-4 pb-4">
+                        <button
+                          onClick={() => deleteProject(project.id)}
+                          className="w-full px-4 py-2 bg-red-600 hover:bg-red-700 rounded flex items-center justify-center gap-2"
+                        >
+                          <Trash2 size={16} />
+                          Delete
+                        </button>
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
           )}
         </div>
-        <style>{`
-          @keyframes spin {
-            to { transform: rotate(360deg); }
-          }
-        `}</style>
       </div>
     );
   }
 
+  const userId = getUserId();
+  const userPaintedRegions = currentProject?.userProgress?.[userId] || [];
   const progress = currentProject && currentProject.regions.length > 0 
-    ? (currentProject.paintedRegions.length / currentProject.regions.length * 100).toFixed(1)
+    ? (userPaintedRegions.length / currentProject.regions.length * 100).toFixed(1)
     : 0;
 
+  if (!currentProject) {
+    return (
+      <div className="w-full h-screen flex items-center justify-center bg-gray-900 text-white">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-white mx-auto mb-4"></div>
+          <div>Loading project...</div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div style={{ width: '100%', height: '100vh', display: 'flex', flexDirection: 'column', backgroundColor: '#111827', color: 'white' }}>
-      <div style={{ padding: '1rem', backgroundColor: '#1f2937', borderBottom: '1px solid #374151' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem' }}>
+    <div className="w-full h-screen flex flex-col bg-gray-900 text-white">
+      <div className="p-4 bg-gray-800 border-b border-gray-700">
+        <div className="flex items-center gap-4 mb-4">
           <button 
             onClick={backToGallery}
-            style={{ 
-              padding: '0.5rem', 
-              backgroundColor: 'transparent',
-              border: 'none',
-              color: 'white',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.5rem',
-              borderRadius: '0.25rem'
-            }}
+            className="p-2 hover:bg-gray-700 rounded flex items-center gap-2"
           >
             <ArrowLeft size={20} />
             Back to Gallery
           </button>
-          <h1 style={{ fontSize: '1.5rem', fontWeight: 'bold' }}>{currentProject?.name}</h1>
+          <h1 className="text-2xl font-bold">{currentProject?.name}</h1>
+          {isAdmin && (
+            <div className="ml-auto flex items-center gap-2 px-3 py-1 bg-green-600 rounded text-sm">
+              <Unlock size={16} />
+              Admin
+            </div>
+          )}
         </div>
         
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', alignItems: 'center' }}>
+        <div className="flex flex-wrap gap-4 items-center">
           <button 
             onClick={() => setZoom(z => Math.min(z + 0.5, 5))}
-            style={{ padding: '0.5rem', backgroundColor: '#374151', border: 'none', borderRadius: '0.25rem', cursor: 'pointer', color: 'white' }}
+            className="p-2 bg-gray-700 hover:bg-gray-600 rounded"
           >
             <ZoomIn size={20} />
           </button>
           <button 
             onClick={() => setZoom(z => Math.max(z - 0.5, 0.5))}
-            style={{ padding: '0.5rem', backgroundColor: '#374151', border: 'none', borderRadius: '0.25rem', cursor: 'pointer', color: 'white' }}
+            className="p-2 bg-gray-700 hover:bg-gray-600 rounded"
           >
             <ZoomOut size={20} />
           </button>
           <button 
             onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}
-            style={{ padding: '0.5rem', backgroundColor: '#374151', border: 'none', borderRadius: '0.25rem', cursor: 'pointer', color: 'white' }}
+            className="p-2 bg-gray-700 hover:bg-gray-600 rounded"
           >
             <RotateCcw size={20} />
           </button>
           <button 
             onClick={() => setShowNumbers(!showNumbers)}
-            style={{ padding: '0.5rem', backgroundColor: '#374151', border: 'none', borderRadius: '0.25rem', cursor: 'pointer', color: 'white' }}
+            className="p-2 bg-gray-700 hover:bg-gray-600 rounded"
           >
             {showNumbers ? <Eye size={20} /> : <EyeOff size={20} />}
           </button>
-          <div style={{ fontSize: '0.875rem' }}>
-            Progress: {progress}% ({currentProject?.paintedRegions.length}/{currentProject?.regions.length} regions)
+          <div className="text-sm">
+            Your Progress: {progress}% ({userPaintedRegions.length}/{currentProject?.regions.length} regions)
           </div>
         </div>
       </div>
 
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-        <div style={{ flex: 1, position: 'relative', overflow: 'hidden', backgroundColor: '#1f2937' }}>
+      <div className="flex flex-1 overflow-hidden">
+        <div className="flex-1 relative overflow-hidden bg-gray-800">
           <div 
-            style={{ 
-              position: 'absolute', 
-              inset: 0, 
-              overflow: 'hidden',
-              cursor: isDragging ? 'grabbing' : 'crosshair'
-            }}
+            className="absolute inset-0 overflow-hidden"
+            style={{ cursor: isDragging ? 'grabbing' : 'crosshair' }}
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
@@ -621,56 +725,48 @@ const PaintByNumbers = () => {
               transformOrigin: '0 0',
               position: 'relative'
             }}>
-              <canvas ref={canvasRef} style={{ position: 'absolute' }} />
+              <canvas ref={canvasRef} className="absolute" />
               <canvas 
                 ref={overlayCanvasRef} 
-                style={{ position: 'absolute', cursor: selectedColor ? 'crosshair' : 'default' }}
+                className="absolute"
                 onClick={handleCanvasClick}
+                style={{ cursor: selectedColor ? 'crosshair' : 'default' }}
               />
             </div>
           </div>
         </div>
 
         {currentProject && (
-          <div style={{ width: '20rem', backgroundColor: '#1f2937', borderLeft: '1px solid #374151', overflowY: 'auto', padding: '1rem' }}>
-            <h2 style={{ fontSize: '1.125rem', fontWeight: 'bold', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <div className="w-80 bg-gray-800 border-l border-gray-700 overflow-y-auto p-4">
+            <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
               <Palette size={20} />
               Color Palette
             </h2>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <div className="space-y-2">
               {currentProject.colors.map(color => {
                 const regionCount = currentProject.regions.filter(r => r.colorId === color.id).length;
                 const paintedCount = currentProject.regions.filter(r => 
-                  r.colorId === color.id && currentProject.paintedRegions.includes(r.id)
+                  r.colorId === color.id && userPaintedRegions.includes(r.id)
                 ).length;
                 
                 return (
                   <div 
                     key={color.id}
                     onClick={() => setSelectedColor(color.id)}
-                    style={{
-                      padding: '0.75rem',
-                      borderRadius: '0.25rem',
-                      cursor: 'pointer',
-                      backgroundColor: '#374151',
-                      border: selectedColor === color.id ? '2px solid #2563eb' : 'none',
-                      opacity: paintedCount === regionCount ? 0.5 : 1,
-                      transition: 'all 0.2s'
-                    }}
+                    className={`p-3 rounded cursor-pointer transition-all ${
+                      selectedColor === color.id 
+                        ? 'ring-2 ring-blue-500 bg-gray-700' 
+                        : 'bg-gray-700 hover:bg-gray-600'
+                    } ${paintedCount === regionCount ? 'opacity-50' : ''}`}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                    <div className="flex items-center gap-3">
                       <div 
-                        style={{ 
-                          width: '3rem', 
-                          height: '3rem', 
-                          borderRadius: '0.25rem',
-                          border: '2px solid #4b5563',
-                          backgroundColor: `rgb(${color.r}, ${color.g}, ${color.b})`
-                        }}
+                        className="w-12 h-12 rounded border-2 border-gray-600"
+                        style={{ backgroundColor: `rgb(${color.r}, ${color.g}, ${color.b})` }}
                       />
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontWeight: 'bold' }}>#{color.id}</div>
-                        <div style={{ fontSize: '0.75rem', color: '#9ca3af' }}>
+                      <div className="flex-1">
+                        <div className="font-bold">#{color.id}</div>
+                        <div className="text-xs text-gray-400">
                           {paintedCount}/{regionCount} regions
                           {paintedCount === regionCount && ' ✓'}
                         </div>
@@ -684,7 +780,7 @@ const PaintByNumbers = () => {
         )}
       </div>
       
-      <div style={{ padding: '0.5rem', backgroundColor: '#1f2937', borderTop: '1px solid #374151', fontSize: '0.75rem', color: '#9ca3af', textAlign: 'center' }}>
+      <div className="p-2 bg-gray-800 border-t border-gray-700 text-xs text-gray-400 text-center">
         Tip: Click a color in the palette, then click regions with that number. Hold Shift + drag to pan.
       </div>
     </div>
